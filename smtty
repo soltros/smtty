@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+# smtty - Steam Machine TTY launcher (gamescope-only)
+# Recommended install location:
+#   - $HOME/.local/bin/smtty  (user)
+#   - /usr/local/bin/smtty    (system-wide)
+
+set -euo pipefail
+
+# ---------------- Steam command (Big Picture) ----------------
+if [[ "${STEAM_CMD_OVERRIDE-}" != "" ]]; then
+  # Example: STEAM_CMD_OVERRIDE='steam -tenfoot -nochatui'
+  read -ra STEAM_CMD_ARR <<<"$STEAM_CMD_OVERRIDE"
+else
+  STEAM_CMD_ARR=(steam -tenfoot)
+fi
+
+# ---------------- config paths ----------------
+CONFIG_DIR="$HOME/.config/smtty"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# ---------------- state ----------------
+DRM_SHORT=""
+DRM_NATIVE_MODE=""
+NATIVE_W=0
+NATIVE_H=0
+
+GAME_W=0
+GAME_H=0
+STRETCH_FLAG="none"   # "none" | "stretch"
+
+G_FPS=0               # gamescope -r (target display refresh, Hz; 0 = unlimited)
+
+MISSING_CMDS=()
+HAVE_CONFIG=0
+
+# flags
+FLAG_HELP=0
+FLAG_NEW=0
+FLAG_LAST=0
+FLAG_PRINT=0
+
+# ---------------- helpers ----------------
+require_cmd() {
+  local cmd=$1
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    MISSING_CMDS+=("$cmd")
+  fi
+}
+
+prompt_select() {
+  local prompt=$1
+  shift
+  local count=$#
+  local i=1
+  local opt
+  for opt in "$@"; do
+    printf '  [%d] %s\n' "$i" "$opt"
+    i=$((i + 1))
+  done
+  local sel
+  while :; do
+    read -rp "$prompt " sel || exit 1
+    if [[ ! "$sel" =~ ^[0-9]+$ ]]; then
+      echo "Enter a number."
+      continue
+    fi
+    if (( sel >= 1 && sel <= count )); then
+      REPLY=$sel
+      return 0
+    fi
+    echo "Out of range."
+  done
+}
+
+read_default() {
+  local prompt=$1
+  local def=$2
+  local val
+  read -rp "$prompt [$def]: " val || exit 1
+  if [[ -z "$val" ]]; then
+    printf '%s\n' "$def"
+  else
+    printf '%s\n' "$val"
+  fi
+}
+
+print_help() {
+  cat <<EOF
+smtty - Steam Machine TTY launcher (gamescope-only)
+
+Usage:
+  smtty [options]
+
+Options:
+  -h        Show this help and exit.
+  -n        New interactive setup, ignore saved config.
+  -l        Use last saved config immediately (no questions).
+  -p        Print saved config summary and exit.
+
+Environment:
+  STEAM_CMD_OVERRIDE='steam -tenfoot'
+      Override the Steam command used (default: steam -tenfoot).
+
+Config:
+  $CONFIG_FILE
+      Stores DRM output, resolution, stretch flag and gamescope target display rate.
+EOF
+}
+
+print_config_summary() {
+  if (( HAVE_CONFIG == 0 )); then
+    echo "No saved config at $CONFIG_FILE"
+    return
+  fi
+
+  echo "Saved smtty config ($CONFIG_FILE):"
+  echo "  DRM output:             $DRM_SHORT"
+  echo "  Native mode:            $DRM_NATIVE_MODE"
+  echo "  Game resolution:        ${GAME_W}x${GAME_H}"
+  echo "  Stretch flag:           $STRETCH_FLAG"
+  echo "  gamescope display rate: $G_FPS Hz (0 = unlimited)"
+}
+
+save_config() {
+  mkdir -p "$CONFIG_DIR"
+  cat >"$CONFIG_FILE" <<EOF
+DRM_SHORT=$DRM_SHORT
+DRM_NATIVE_MODE=$DRM_NATIVE_MODE
+NATIVE_W=$NATIVE_W
+NATIVE_H=$NATIVE_H
+GAME_W=$GAME_W
+GAME_H=$GAME_H
+STRETCH_FLAG=$STRETCH_FLAG
+G_FPS=$G_FPS
+EOF
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE"
+    HAVE_CONFIG=1
+  fi
+}
+
+# ---------------- output / resolution selection ----------------
+choose_drm_output() {
+  echo "Detected *connected* DRM outputs:"
+
+  local entries=()
+  local idx=1
+  local status_path status dir modes_path short native_line
+
+  for status_path in /sys/class/drm/card*-*/status; do
+    [[ -f "$status_path" ]] || continue
+    status=$(<"$status_path")
+    [[ "$status" == "connected" ]] || continue
+
+    dir=${status_path%/status}
+    modes_path="$dir/modes"
+    [[ -f "$modes_path" ]] || continue
+
+    short=${dir##*/}
+    short=${short#card*-}
+
+    if ! read -r native_line <"$modes_path"; then
+      native_line="unknown"
+    fi
+
+    entries+=("$short:$native_line")
+    printf '  [%d] %s (native: %s)\n' "$idx" "$short" "$native_line"
+    idx=$((idx + 1))
+  done
+
+  if ((${#entries[@]} == 0)); then
+    echo "No *connected* DRM outputs found under /sys/class/drm."
+    exit 1
+  fi
+
+  local choice
+  while :; do
+    read -rp "Select output [1-${#entries[@]}]: " choice || exit 1
+    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+      echo "Enter a number."
+      continue
+    fi
+    if (( choice >= 1 && choice <= ${#entries[@]} )); then
+      break
+    fi
+    echo "Out of range."
+  done
+
+  local chosen=${entries[choice-1]}
+  DRM_SHORT=${chosen%%:*}
+  DRM_NATIVE_MODE=${chosen#*:}
+
+  local base=${DRM_NATIVE_MODE%%@*}
+  if [[ "$base" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+    NATIVE_W=${BASH_REMATCH[1]}
+    NATIVE_H=${BASH_REMATCH[2]}
+  else
+    echo "Failed to parse native mode \"$DRM_NATIVE_MODE\"; expected WxH[@Hz]."
+    exit 1
+  fi
+
+  echo
+  echo "Using DRM output: $DRM_SHORT (native ${NATIVE_W}x${NATIVE_H})"
+  echo
+}
+
+choose_resolution_profile() {
+  GAME_W=$NATIVE_W
+  GAME_H=$NATIVE_H
+  STRETCH_FLAG="none"
+
+  if [[ $NATIVE_W -eq 1920 && $NATIVE_H -eq 1080 ]]; then
+    echo "Resolution profile for 1080p 16:9:"
+    prompt_select "Choose profile:" \
+      "Native 1920x1080 (no stretch)" \
+      "1352x1080 (4:3 stretched)" \
+      "1680x1050 (16:10 stretched)" \
+      "Custom"
+    case $REPLY in
+      1) GAME_W=1920; GAME_H=1080; STRETCH_FLAG="none" ;;
+      2) GAME_W=1352; GAME_H=1080; STRETCH_FLAG="stretch" ;;
+      3) GAME_W=1680; GAME_H=1050; STRETCH_FLAG="stretch" ;;
+      4) ;;
+    esac
+  elif [[ $NATIVE_W -eq 2560 && $NATIVE_H -eq 1440 ]]; then
+    echo "Resolution profile for 1440p 16:9:"
+    prompt_select "Choose profile:" \
+      "Native 2560x1440 (no stretch)" \
+      "1920x1440 (4:3, stretched)" \
+      "1920x1200 (16:10, stretched)" \
+      "Custom"
+    case $REPLY in
+      1) GAME_W=2560; GAME_H=1440; STRETCH_FLAG="none" ;;
+      2) GAME_W=1920; GAME_H=1440; STRETCH_FLAG="stretch" ;;
+      3) GAME_W=1920; GAME_H=1200; STRETCH_FLAG="stretch" ;;
+      4) ;;
+    esac
+  elif [[ $NATIVE_W -eq 3840 && $NATIVE_H -eq 2160 ]]; then
+    echo "Resolution profile for 4K 16:9:"
+    prompt_select "Choose profile:" \
+      "Native 3840x2160 (no stretch)" \
+      "2560x1440 (downscale, no stretch)" \
+      "1920x1440 (4:3, stretched)" \
+      "1920x1200 (16:10, stretched)" \
+      "Custom"
+    case $REPLY in
+      1) GAME_W=3840; GAME_H=2160; STRETCH_FLAG="none" ;;
+      2) GAME_W=2560; GAME_H=1440; STRETCH_FLAG="none" ;;
+      3) GAME_W=1920; GAME_H=1440; STRETCH_FLAG="stretch" ;;
+      4) GAME_W=1920; GAME_H=1200; STRETCH_FLAG="stretch" ;;
+      5) ;;
+    esac
+  fi
+
+  local default_str="${GAME_W}x${GAME_H}"
+  local resp
+  resp=$(read_default "Internal GAME resolution WxH (gamescope -w/-h)" "$default_str")
+  if [[ "$resp" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+    GAME_W=${BASH_REMATCH[1]}
+    GAME_H=${BASH_REMATCH[2]}
+  else
+    echo "Invalid format; keeping $default_str."
+  fi
+
+  echo
+  echo "Game resolution: ${GAME_W}x${GAME_H}"
+  echo "Stretch flag:    ${STRETCH_FLAG}"
+  echo
+}
+
+choose_gamescope_rate() {
+  local val
+  val=$(read_default "Target display refresh for gamescope (-r, Hz, 0 = unlimited)" "$G_FPS")
+  if [[ ! "$val" =~ ^[0-9]+$ ]]; then
+    echo "Invalid value; using 0."
+    val=0
+  fi
+  G_FPS=$val
+}
+
+# ---------------- gamescope path ----------------
+check_deps() {
+  MISSING_CMDS=()
+  require_cmd gamescope
+  require_cmd "${STEAM_CMD_ARR[0]}"
+
+  if ((${#MISSING_CMDS[@]} > 0)); then
+    echo "Missing required commands:"
+    printf '  - %s\n' "${MISSING_CMDS[@]}"
+    echo
+    echo "Install the missing utilities with your package manager."
+    exit 1
+  fi
+}
+
+launch_gamescope_session() {
+  check_deps
+
+  echo
+  echo "Launching gamescope on $DRM_SHORT:"
+  echo "  Outer (panel):  ${NATIVE_W}x${NATIVE_H}"
+  echo "  Inner (game):   ${GAME_W}x${GAME_H}"
+  echo "  Stretch mode:   ${STRETCH_FLAG}"
+  echo "  Target refresh: ${G_FPS} Hz (gamescope -r, 0 = unlimited)"
+  echo
+
+  local args=()
+  args+=(-f -e)
+  args+=(-W "$NATIVE_W" -H "$NATIVE_H")
+  args+=(-w "$GAME_W" -h "$GAME_H")
+  args+=(-O "$DRM_SHORT")
+
+  if (( G_FPS > 0 )); then
+    args+=(-r "$G_FPS")
+  fi
+
+  if [[ "$STRETCH_FLAG" == "stretch" ]]; then
+    args+=(-S stretch)
+  fi
+
+  echo "Command:"
+  printf 'gamescope'
+  printf ' %q' "${args[@]}"
+  printf ' --'
+  printf ' %q' "${STEAM_CMD_ARR[@]}"
+  printf '\n\n'
+
+  exec gamescope "${args[@]}" -- "${STEAM_CMD_ARR[@]}"
+}
+
+interactive_new_config() {
+  choose_drm_output
+  choose_resolution_profile
+  choose_gamescope_rate
+  save_config
+  launch_gamescope_session
+}
+
+run_from_current_config() {
+  if [[ -z "$DRM_SHORT" || -z "$DRM_NATIVE_MODE" ]]; then
+    echo "Config incomplete; re-running interactive setup."
+    interactive_new_config
+  fi
+  launch_gamescope_session
+}
+
+# ---------------- main ----------------
+if [[ ${UID:-$(id -u)} -eq 0 ]]; then
+  echo "Do not run as root. Log in on a TTY as your normal user and run this script."
+  exit 1
+fi
+
+while getopts ":hnlp" opt; do
+  case "$opt" in
+    h) FLAG_HELP=1 ;;
+    n) FLAG_NEW=1 ;;
+    l) FLAG_LAST=1 ;;
+    p) FLAG_PRINT=1 ;;
+    \?) echo "Unknown option: -$OPTARG"; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if (( FLAG_HELP )); then
+  print_help
+  exit 0
+fi
+
+load_config
+
+if (( FLAG_PRINT )); then
+  print_config_summary
+  exit 0
+fi
+
+if (( FLAG_NEW )); then
+  interactive_new_config
+fi
+
+if (( FLAG_LAST )); then
+  if (( HAVE_CONFIG == 0 )); then
+    echo "No saved config; doing new interactive setup."
+    interactive_new_config
+  else
+    print_config_summary
+    run_from_current_config
+  fi
+fi
+
+if (( HAVE_CONFIG )); then
+  echo "Found saved smtty config."
+  print_config_summary
+  echo
+  read -rp "Use last settings? [y/N]: " ans || exit 1
+  case "$ans" in
+    [yY]) run_from_current_config ;;
+    *)    interactive_new_config ;;
+  esac
+else
+  interactive_new_config
+fi

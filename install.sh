@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# install.sh - installer for smtty
+#
+# Defaults to user install in: $HOME/.local/bin/smtty
+# Override with: PREFIX=/some/prefix ./install.sh
+#   -> installs to: $PREFIX/bin/smtty
+
+set -euo pipefail
+
+PREFIX=${PREFIX:-"$HOME/.local"}
+BINDIR="$PREFIX/bin"
+TARGET="$BINDIR/smtty"
+
+# Resolve script dir
+SCRIPT_DIR=$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1
+  pwd
+)
+
+SOURCE=""
+if [[ -f "$SCRIPT_DIR/smtty" ]]; then
+  SOURCE="$SCRIPT_DIR/smtty"
+elif [[ -f "$SCRIPT_DIR/smtty.sh" ]]; then
+  SOURCE="$SCRIPT_DIR/smtty.sh"
+else
+  echo "Error: smtty or smtty.sh not found next to install.sh"
+  exit 1
+fi
+
+mkdir -p "$BINDIR"
+
+if [[ -e "$TARGET" ]]; then
+  echo "Existing smtty detected at: $TARGET"
+  echo
+  echo "Choose action:"
+  echo "  [1] Overwrite with current version"
+  echo "  [2] Uninstall smtty from $BINDIR"
+  echo "  [3] Abort"
+  read -rp "Selection [1/2/3]: " ans
+  case "$ans" in
+    1)
+      cp "$SOURCE" "$TARGET"
+      chmod +x "$TARGET"
+      echo "Updated smtty at $TARGET"
+      ;;
+    2)
+      rm -f "$TARGET"
+      echo "Removed smtty from $TARGET"
+      # optional config removal
+      if [[ -d "$HOME/.config/smtty" ]]; then
+        read -rp "Remove config directory $HOME/.config/smtty? [y/N]: " c
+        case "$c" in
+          [yY]) rm -rf "$HOME/.config/smtty"; echo "Config removed.";;
+          *)    echo "Config kept.";;
+        esac
+      fi
+      exit 0
+      ;;
+    3|*)
+      echo "Aborted."
+      exit 1
+      ;;
+  esac
+else
+  cp "$SOURCE" "$TARGET"
+  chmod +x "$TARGET"
+  echo "Installed smtty to $TARGET"
+fi
+
+# PATH hint
+case ":$PATH:" in
+  *":$BINDIR:"*) ;;
+  *)
+    echo
+    echo "Warning: $BINDIR is not in your PATH."
+    echo "Add this to your shell config (example for bash):"
+    echo "  export PATH=\"$BINDIR:\$PATH\""
+    ;;
+esac
+
+echo
+echo "You can now run: smtty"
