@@ -61,6 +61,7 @@ FLAG_NEW=0
 FLAG_LAST=0
 FLAG_PRINT=0
 FLAG_KILL=0
+FLAG_DETACH=0
 
 # ---------------- helpers ----------------
 require_cmd() {
@@ -120,6 +121,7 @@ Options:
   -l        Use last saved config immediately (no questions).
   -p        Print saved config summary and exit.
   -k        Kill any running gamescope processes and exit.
+  -d        Detach: start gamescope/Steam in the background and return immediately.
 
 Environment:
   STEAM_CMD_OVERRIDE='steam -gamepadui'
@@ -536,6 +538,7 @@ launch_gamescope_session() {
   echo "  HDR enabled:           ${ENABLE_GAMESCOPE_HDR}"
   echo "  HDR ITM target nits:   ${GAMESCOPE_HDR_NITS}"
   echo "  PipeWire debug mode:   ${PIPEWIRE_DEBUG_MODE}"
+  echo "  Detach mode:           ${FLAG_DETACH}"
   echo
 
   local args=()
@@ -578,7 +581,20 @@ launch_gamescope_session() {
     export PIPEWIRE_DEBUG="$PIPEWIRE_DEBUG_MODE"
   fi
 
-  exec gamescope "${args[@]}" -- "${STEAM_CMD_ARR[@]}"
+  if (( FLAG_DETACH )); then
+    # Detached mode: run gamescope in background, detach from terminal.
+    # Requires "setsid" (usually in util-linux).
+    if command -v setsid >/dev/null 2>&1; then
+      setsid gamescope "${args[@]}" -- "${STEAM_CMD_ARR[@]}" >/dev/null 2>&1 &
+    else
+      gamescope "${args[@]}" -- "${STEAM_CMD_ARR[@]}" >/dev/null 2>&1 &
+    fi
+    echo "gamescope started in detached mode with PID $!."
+    echo "Use 'smtty -k' to kill any running gamescope processes."
+    exit 0
+  else
+    exec gamescope "${args[@]}" -- "${STEAM_CMD_ARR[@]}"
+  fi
 }
 
 interactive_new_config() {
@@ -641,13 +657,14 @@ if [[ ${UID:-$(id -u)} -eq 0 ]]; then
   exit 1
 fi
 
-while getopts ":hnlpk" opt; do
+while getopts ":hnlpkd" opt; do
   case "$opt" in
     h) FLAG_HELP=1 ;;
     n) FLAG_NEW=1 ;;
     l) FLAG_LAST=1 ;;
     p) FLAG_PRINT=1 ;;
     k) FLAG_KILL=1 ;;
+    d) FLAG_DETACH=1 ;;
     \?) echo "Unknown option: -$OPTARG"; exit 1 ;;
   esac
 done
