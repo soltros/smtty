@@ -317,9 +317,12 @@ detect_steam_installations() {
     if (( have_native )); then
       STEAM_TYPE="native"
       echo "Detected: Native Steam"
-    else
+    elif (( have_flatpak )); then
       STEAM_TYPE="flatpak"
       echo "Detected: Steam Flatpak"
+    else
+      echo "Internal error: Unknown Steam type despite one available."
+      exit 1
     fi
     echo
     return
