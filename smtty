@@ -52,6 +52,11 @@ FORCE_GRAB_CURSOR=0      # 0/1 -> --force-grab-cursor (KMS only)
 # "3"       = verbose debug
 PIPEWIRE_DEBUG_MODE="inherit"
 
+# LD_PRELOAD handling for gamescope/Steam
+# "inherit" = do not modify LD_PRELOAD
+# "clear"   = export LD_PRELOAD="" before launching gamescope
+LD_PRELOAD_MODE="inherit"
+
 MISSING_CMDS=()
 HAVE_CONFIG=0
 
@@ -129,11 +134,14 @@ Environment:
   PIPEWIRE_DEBUG
       If smtty PipeWire mode is "inherit", this is passed through unchanged.
       Otherwise, smtty overrides it with the selected numeric level.
+  LD_PRELOAD
+      If smtty LD_PRELOAD mode is "inherit", this is passed through unchanged.
+      If mode is "clear", smtty exports LD_PRELOAD="" before gamescope.
 
 Config:
   $CONFIG_FILE
       Stores DRM output, resolution, stretch flag, gamescope display rate,
-      VRR / HDR settings, PipeWire debug level, and Steam type.
+      VRR / HDR settings, PipeWire debug level, LD_PRELOAD handling, and Steam type.
 
 Notes:
   - Can be run from a bare TTY (KMS mode) or from inside a compositor
@@ -160,6 +168,7 @@ print_config_summary() {
   echo "  gamescope HDR target nits $GAMESCOPE_HDR_NITS"
   echo "  gamescope force grab:     $FORCE_GRAB_CURSOR"
   echo "  PipeWire debug mode:      $PIPEWIRE_DEBUG_MODE (inherit or 0–3)"
+  echo "  LD_PRELOAD mode:          ${LD_PRELOAD_MODE:-inherit} (inherit or clear)"
 }
 
 save_config() {
@@ -179,6 +188,7 @@ ENABLE_GAMESCOPE_HDR=$ENABLE_GAMESCOPE_HDR
 GAMESCOPE_HDR_NITS=$GAMESCOPE_HDR_NITS
 FORCE_GRAB_CURSOR=$FORCE_GRAB_CURSOR
 PIPEWIRE_DEBUG_MODE=$PIPEWIRE_DEBUG_MODE
+LD_PRELOAD_MODE=$LD_PRELOAD_MODE
 EOF
 }
 
@@ -191,6 +201,7 @@ load_config() {
   # Backward compatibility: old configs won't have these
   PIPEWIRE_DEBUG_MODE=${PIPEWIRE_DEBUG_MODE:-inherit}
   FORCE_GRAB_CURSOR=${FORCE_GRAB_CURSOR:-0}
+  LD_PRELOAD_MODE=${LD_PRELOAD_MODE:-inherit}
 }
 
 detect_session_mode() {
@@ -456,6 +467,27 @@ choose_pipewire_debug() {
   echo
 }
 
+choose_ld_preload_mode() {
+  echo "LD_PRELOAD handling for gamescope / Steam:"
+  echo "  Clearing LD_PRELOAD avoids inherited overlays/shims (MangoHud, vkBasalt,"
+  echo "  etc.) from injecting into gamescope or the game."
+  echo
+  prompt_select "Choose LD_PRELOAD mode:" \
+    "Inherit current LD_PRELOAD (do nothing)" \
+    "Clear LD_PRELOAD for gamescope and Steam"
+  case $REPLY in
+    1) LD_PRELOAD_MODE="inherit" ;;
+    2) LD_PRELOAD_MODE="clear" ;;
+    *) LD_PRELOAD_MODE="inherit" ;;
+  esac
+
+  echo
+  echo "LD_PRELOAD mode set to: $LD_PRELOAD_MODE"
+  echo "  inherit = pass through existing LD_PRELOAD"
+  echo "  clear   = export LD_PRELOAD=\"\" before gamescope"
+  echo
+}
+
 # ---------------- Steam installation detection ----------------
 detect_steam_installations() {
   local available=()
@@ -569,6 +601,7 @@ launch_gamescope_session() {
   echo "  HDR ITM target nits:   ${GAMESCOPE_HDR_NITS}"
   echo "  Force cursor grab:     ${FORCE_GRAB_CURSOR} (KMS only)"
   echo "  PipeWire debug mode:   ${PIPEWIRE_DEBUG_MODE}"
+  echo "  LD_PRELOAD mode:       ${LD_PRELOAD_MODE:-inherit}"
   echo "  Detach mode:           ${FLAG_DETACH}"
   echo
 
@@ -617,6 +650,13 @@ launch_gamescope_session() {
     export PIPEWIRE_DEBUG="$PIPEWIRE_DEBUG_MODE"
   fi
 
+  # Apply LD_PRELOAD mode for gamescope / Steam
+  # "inherit" leaves LD_PRELOAD unchanged.
+  # "clear" exports LD_PRELOAD="" to strip inherited overlays/shims.
+  if [[ "${LD_PRELOAD_MODE:-inherit}" == "clear" ]]; then
+    export LD_PRELOAD=""
+  fi
+
   if (( FLAG_DETACH )); then
     # Detached mode: run gamescope in background, detach from terminal.
     # Requires "setsid" (usually in util-linux).
@@ -641,6 +681,7 @@ interactive_new_config() {
   choose_gamescope_rate
   choose_vrr_hdr_and_steamos
   choose_pipewire_debug
+  choose_ld_preload_mode
   save_config
   launch_gamescope_session
 }
@@ -653,13 +694,14 @@ run_from_current_config() {
     interactive_new_config
   fi
 
-  # Set default if not set
+  # Set defaults if not set
   if [[ -z "${STEAM_TYPE:-}" ]]; then
     STEAM_TYPE="native"
   fi
 
   PIPEWIRE_DEBUG_MODE=${PIPEWIRE_DEBUG_MODE:-inherit}
   FORCE_GRAB_CURSOR=${FORCE_GRAB_CURSOR:-0}
+  LD_PRELOAD_MODE=${LD_PRELOAD_MODE:-inherit}
 
   # Validate that the saved Steam type is still available
   if [[ "$STEAM_TYPE" == "flatpak" ]]; then
