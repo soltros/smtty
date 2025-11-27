@@ -7,3 +7,7 @@ A minimal TTY "Steam Machine" launcher that runs Steam Big Picture inside gamesc
 - **Steam cannot be running in any other session or smtty will fail.**
 
 - **Make sure “Enable GPU accelerated rendering in web views” is enabled in Steam, or Steam notifications can cover the entire screen with a black image when running under gamescope.**
+
+- **Some games do not like `--force-grab-cursor`; test it per game and per session (DE/WM vs TTY) if you hit cursor or input issues.**
+
+- **If your camera or cursor gets stuck at the screen edge, briefly open then close Steam Big Picture over the game or pause/unpause; if it keeps happening, try `--force-grab-cursor` as a last resort.**
