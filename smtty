@@ -38,11 +38,10 @@ STRETCH_FLAG="none"   # "none" | "stretch"
 
 G_FPS=0               # gamescope -r (target display refresh, Hz; 0 = unlimited)
 
-# VRR / HDR / Steam / cursor flags
+# VRR / HDR / cursor flags
 ADAPTIVE_SYNC=0          # 0/1 -> --adaptive-sync
 ENABLE_GAMESCOPE_HDR=0   # 0/1 -> --hdr-enabled (+ ITM)
 GAMESCOPE_HDR_NITS=1000  # used with --hdr-itm-target-nits
-STEAM_USE_STEAMOS_FLAG=0 # 0/1 -> add -steamos to Steam
 FORCE_GRAB_CURSOR=0      # 0/1 -> --force-grab-cursor (KMS only)
 
 # PipeWire debug control for gamescope
@@ -134,7 +133,7 @@ Environment:
 Config:
   $CONFIG_FILE
       Stores DRM output, resolution, stretch flag, gamescope display rate,
-      VRR / HDR settings, PipeWire debug level, and Steam type/flags.
+      VRR / HDR settings, PipeWire debug level, and Steam type.
 
 Notes:
   - Can be run from a bare TTY (KMS mode) or from inside a compositor
@@ -151,7 +150,6 @@ print_config_summary() {
 
   echo "Saved smtty config ($CONFIG_FILE):"
   echo "  Steam type:               ${STEAM_TYPE:-native}"
-  echo "  Steam -steamos flag:      ${STEAM_USE_STEAMOS_FLAG}"
   echo "  DRM output:               $DRM_SHORT"
   echo "  Native mode:              $DRM_NATIVE_MODE"
   echo "  Game resolution:          ${GAME_W}x${GAME_H}"
@@ -179,7 +177,6 @@ STEAM_TYPE=$STEAM_TYPE
 ADAPTIVE_SYNC=$ADAPTIVE_SYNC
 ENABLE_GAMESCOPE_HDR=$ENABLE_GAMESCOPE_HDR
 GAMESCOPE_HDR_NITS=$GAMESCOPE_HDR_NITS
-STEAM_USE_STEAMOS_FLAG=$STEAM_USE_STEAMOS_FLAG
 FORCE_GRAB_CURSOR=$FORCE_GRAB_CURSOR
 PIPEWIRE_DEBUG_MODE=$PIPEWIRE_DEBUG_MODE
 EOF
@@ -364,7 +361,7 @@ choose_gamescope_rate() {
 }
 
 choose_vrr_hdr_and_steamos() {
-  echo "Optional gamescope / Steam features:"
+  echo "Optional gamescope features:"
 
   # VRR / adaptive sync
   local vrr
@@ -389,15 +386,6 @@ choose_vrr_hdr_and_steamos() {
     fi
   else
     ENABLE_GAMESCOPE_HDR=0
-  fi
-
-  # Steam -steamos flag
-  local steamos
-  steamos=$(read_default "Add -steamos to Steam command? (0 = no, 1 = yes)" "$STEAM_USE_STEAMOS_FLAG")
-  if [[ "$steamos" == "1" ]]; then
-    STEAM_USE_STEAMOS_FLAG=1
-  else
-    STEAM_USE_STEAMOS_FLAG=0
   fi
 
   echo
@@ -509,17 +497,9 @@ configure_steam_command() {
   fi
 
   if [[ "$STEAM_TYPE" == "flatpak" ]]; then
-    if (( STEAM_USE_STEAMOS_FLAG )); then
-      STEAM_CMD_ARR=(flatpak run com.valvesoftware.Steam -steamos -gamepadui)
-    else
-      STEAM_CMD_ARR=(flatpak run com.valvesoftware.Steam -gamepadui)
-    fi
+    STEAM_CMD_ARR=(flatpak run com.valvesoftware.Steam -gamepadui)
   else
-    if (( STEAM_USE_STEAMOS_FLAG )); then
-      STEAM_CMD_ARR=(steam -steamos -gamepadui)
-    else
-      STEAM_CMD_ARR=(steam -gamepadui)
-    fi
+    STEAM_CMD_ARR=(steam -gamepadui)
   fi
 }
 
@@ -557,7 +537,6 @@ launch_gamescope_session() {
   echo "Launching gamescope:"
   echo "  Session mode:          $SESSION_MODE (kms = bare VT, nested = under compositor)"
   echo "  Steam type:            ${STEAM_TYPE:-native}"
-  echo "  Steam -steamos flag:   ${STEAM_USE_STEAMOS_FLAG}"
   echo "  DRM output:            $DRM_SHORT"
   echo "  Outer (panel/native):  ${NATIVE_W}x${NATIVE_H}"
   echo "  Inner (game):          ${GAME_W}x${GAME_H}"
