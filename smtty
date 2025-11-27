@@ -67,6 +67,7 @@ FLAG_LAST=0
 FLAG_PRINT=0
 FLAG_KILL=0
 FLAG_DETACH=0
+FLAG_LAUNCH_OPTS=0  # -O
 
 # ---------------- helpers ----------------
 require_cmd() {
@@ -127,6 +128,7 @@ Options:
   -p        Print saved config summary and exit.
   -k        Kill any running gamescope processes and exit.
   -d        Detach: start gamescope/Steam in the background and return immediately.
+  -O        Print ready-to-paste Steam per-game launch options for current config and exit.
 
 Environment:
   STEAM_CMD_OVERRIDE='steam -gamepadui'
@@ -488,7 +490,56 @@ choose_ld_preload_mode() {
   echo
 }
 
+print_steam_launch_options() {
+  if (( HAVE_CONFIG == 0 )); then
+    echo "No saved config; run 'smtty -n -O' first to create one."
+    exit 1
+  fi
+
+  echo "Steam per-game launch options (nested under your compositor):"
+  echo
+
+  local args=()
+  args+=(-f -e)
+  args+=(-W "$NATIVE_W" -H "$NATIVE_H")
+  args+=(-w "$GAME_W" -h "$GAME_H")
+
+  if (( G_FPS > 0 )); then
+    args+=(-r "$G_FPS")
+  fi
+
+  if [[ "$STRETCH_FLAG" == "stretch" ]]; then
+    args+=(-S stretch)
+  fi
+
+  if (( ADAPTIVE_SYNC == 1 )); then
+    args+=(--adaptive-sync)
+  fi
+
+  if (( ENABLE_GAMESCOPE_HDR == 1 )); then
+    args+=(--hdr-enabled --hdr-itm-enable --hdr-itm-target-nits "$GAMESCOPE_HDR_NITS")
+  fi
+
+  # No force-grab cursor here; this is intended for nested use via Steam.
+
+  local env_prefix=""
+  if [[ "${PIPEWIRE_DEBUG_MODE:-inherit}" != "inherit" ]]; then
+    env_prefix+="PIPEWIRE_DEBUG=$PIPEWIRE_DEBUG_MODE "
+  fi
+  if [[ "${LD_PRELOAD_MODE:-inherit}" == "clear" ]]; then
+    env_prefix+='LD_PRELOAD="" '
+  fi
+
+  printf '%s' "$env_prefix"
+  printf 'gamescope'
+  printf ' %q' "${args[@]}"
+  printf ' -- %%command%%\n'
+
+  exit 0
+}
+
 # ---------------- Steam installation detection ----------------
+
 detect_steam_installations() {
   local available=()
   local have_native=0
@@ -683,6 +734,11 @@ interactive_new_config() {
   choose_pipewire_debug
   choose_ld_preload_mode
   save_config
+
+  if (( FLAG_LAUNCH_OPTS )); then
+    print_steam_launch_options
+  fi
+
   launch_gamescope_session
 }
 
@@ -719,6 +775,10 @@ run_from_current_config() {
     fi
   fi
 
+  if (( FLAG_LAUNCH_OPTS )); then
+    print_steam_launch_options
+  fi
+
   launch_gamescope_session
 }
 
@@ -736,7 +796,7 @@ if [[ ${UID:-$(id -u)} -eq 0 ]]; then
   exit 1
 fi
 
-while getopts ":hnlpkd" opt; do
+while getopts ":hnlpkdO" opt; do
   case "$opt" in
     h) FLAG_HELP=1 ;;
     n) FLAG_NEW=1 ;;
@@ -744,6 +804,7 @@ while getopts ":hnlpkd" opt; do
     p) FLAG_PRINT=1 ;;
     k) FLAG_KILL=1 ;;
     d) FLAG_DETACH=1 ;;
+    O) FLAG_LAUNCH_OPTS=1 ;;
     \?) echo "Unknown option: -$OPTARG"; exit 1 ;;
   esac
 done
@@ -785,11 +846,15 @@ if (( HAVE_CONFIG )); then
   echo "Found saved smtty config."
   print_config_summary
   echo
-  read -rp "Use last settings? [y/N]: " ans || exit 1
-  case "$ans" in
-    [yY]) run_from_current_config ;;
-    *)    interactive_new_config ;;
-  esac
+  if (( FLAG_LAUNCH_OPTS )); then
+    run_from_current_config
+  else
+    read -rp "Use last settings? [y/N]: " ans || exit 1
+    case "$ans" in
+      [yY]) run_from_current_config ;;
+      *)    interactive_new_config ;;
+    esac
+  fi
 else
   interactive_new_config
 fi
