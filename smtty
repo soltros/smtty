@@ -34,6 +34,7 @@
 #
 #   -l
 #     Use last saved smtty config (DRM, res, VRR, HDR, etc.) non-interactively.
+#     Note: with -l, smtty will NOT kill Steam or ask about it unless you also pass -S.
 #
 #   -n
 #     New interactive setup for smtty config.
@@ -43,6 +44,9 @@
 #
 #   -d
 #     Detach gamescope (run in background, return to shell).
+#
+#   -S
+#     Kill any running Steam client before launching gamescope (no questions).
 
 set -euo pipefail
 
@@ -113,6 +117,7 @@ FLAG_DETACH=0
 FLAG_LAUNCH_OPTS=0  # -O: generate Steam launch options
 FLAG_RECORD=0       # -R: record last game (from Steam)
 FLAG_REPLAY_GAME=0  # -r: replay last recorded game inside gamescope
+FLAG_KILL_STEAM=0   # -S: kill Steam client before launching (no prompt)
 
 # ---------------- helpers ----------------
 require_cmd() {
@@ -170,9 +175,11 @@ Options:
   -h        Show this help and exit.
   -n        New interactive setup, ignore saved config.
   -l        Use last saved config immediately (no questions).
+            With -l, smtty never kills Steam unless you also pass -S.
   -p        Print saved config summary and exit.
   -k        Kill any running gamescope processes and exit.
   -d        Detach: start gamescope/Steam in the background and return immediately.
+  -S        Kill any running Steam client before launching gamescope (no prompt).
   -O        Interactively generate ready-to-paste Steam per-game launch options and exit.
   -R        Record the game being launched (Steam/Proton env + command) and then run it.
             Intended for use from Steam launch options, e.g.:
@@ -780,6 +787,51 @@ check_deps() {
   fi
 }
 
+steam_is_running() {
+  pgrep -x steam >/dev/null 2>&1
+}
+
+kill_steam_client() {
+  if pkill steam >/dev/null 2>&1; then
+    echo "Killed Steam client."
+  else
+    echo "No Steam client processes found."
+  fi
+}
+
+handle_running_steam_before_launch() {
+  if ! steam_is_running; then
+    return 0
+  fi
+
+  if (( FLAG_KILL_STEAM )); then
+    # Explicit user request via -S: no prompt.
+    kill_steam_client
+    return 0
+  fi
+
+  if (( FLAG_LAST )); then
+    # -l is defined as non-interactive: do not prompt or kill.
+    return 0
+  fi
+
+  echo "Steam client is currently running."
+  echo "There can only be one Steam instance at a time."
+  echo "To launch Steam inside gamescope, smtty needs to stop the existing"
+  echo "desktop Steam process and then relaunch Steam Gamepad UI in gamescope."
+  local ans
+  read -rp "Kill desktop Steam and relaunch it inside gamescope now? [y/N]: " ans || exit 1
+  case "$ans" in
+    [yY])
+      kill_steam_client
+      ;;
+    *)
+      echo "Leaving existing Steam session running. Aborting smtty launch to avoid a broken gamescope start."
+      exit 1
+      ;;
+  esac
+}
+
 launch_gamescope_session() {
   configure_steam_command
   check_deps
@@ -893,6 +945,7 @@ interactive_new_config() {
   choose_pipewire_debug
   choose_ld_preload_mode
   save_config
+  handle_running_steam_before_launch
   launch_gamescope_session
 }
 
@@ -927,6 +980,7 @@ run_from_current_config() {
     fi
   fi
 
+  handle_running_steam_before_launch
   launch_gamescope_session
 }
 
@@ -959,10 +1013,19 @@ handle_last_with_replay_menu() {
     exit 1
   fi
 
+  if ! steam_is_running; then
+    FLAG_REPLAY_GAME=1
+    run_from_current_config
+    return
+  fi
+
   echo
   echo "smtty last-config + replay mode:"
+  echo "  Steam desktop client is currently running."
+  echo "  There can only be one Steam instance at a time."
   echo "  1) Run last recorded game only (using recorded Proton pipeline)."
-  echo "  2) Kill Steam and launch Steam Gamepad UI (Big Picture) instead."
+  echo "     Steam desktop stays running; gamescope will not relaunch Gamepad UI."
+  echo "  2) Kill desktop Steam and launch Steam Gamepad UI (Big Picture) in gamescope."
   local choice
   while :; do
     read -rp "Choose [1/2]: " choice || exit 1
@@ -973,8 +1036,8 @@ handle_last_with_replay_menu() {
         return
         ;;
       2)
-        echo "Killing Steam..."
-        pkill steam >/dev/null 2>&1 || true
+        echo "Killing desktop Steam and relaunching Gamepad UI in gamescope..."
+        kill_steam_client
         FLAG_REPLAY_GAME=0
         run_from_current_config
         return
@@ -1000,7 +1063,7 @@ if [[ ${UID:-$(id -u)} -eq 0 ]]; then
   exit 1
 fi
 
-while getopts ":hnlpkdORr" opt; do
+while getopts ":hnlpkdORrS" opt; do
   case "$opt" in
     h) FLAG_HELP=1 ;;
     n) FLAG_NEW=1 ;;
@@ -1011,6 +1074,7 @@ while getopts ":hnlpkdORr" opt; do
     O) FLAG_LAUNCH_OPTS=1 ;;
     R) FLAG_RECORD=1 ;;
     r) FLAG_REPLAY_GAME=1 ;;
+    S) FLAG_KILL_STEAM=1 ;;
     \?) echo "Unknown option: -$OPTARG"; exit 1 ;;
   esac
 done
