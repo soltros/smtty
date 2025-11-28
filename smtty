@@ -47,6 +47,18 @@
 #
 #   -S
 #     Kill any running Steam client before launching gamescope (no questions).
+#
+# Gamescope backend:
+#   smtty can optionally use either:
+#     - Direct gamescope (default, portable)
+#     - ChimeraOS gamescope-session-plus "steam" session (Arch-based only, KMS TTY only)
+#   The backend is selected during interactive setup (-n) and saved in config.
+#   Chimera backend requires:
+#     - Arch / Arch-based system (AUR layout)
+#     - gamescope-session-git
+#     - gamescope-session-steam-git
+#     - gamescope (from official repo or a provider like gamescope-plus)
+#   smtty never installs these itself; it only tells you what to install.
 
 set -euo pipefail
 
@@ -64,6 +76,11 @@ STEAM_TYPE=""  # "native" or "flatpak"
 
 # Session mode: "kms" (bare VT) or "nested" (X11/Wayland compositor)
 SESSION_MODE="kms"
+
+# Gamescope backend:
+#   "vanilla" = direct gamescope (default)
+#   "chimera" = gamescope-session-plus steam session (Arch-only, KMS-only)
+GAMESCOPE_BACKEND="vanilla"
 
 # ---------------- config paths ----------------
 CONFIG_DIR="$HOME/.config/smtty"
@@ -83,10 +100,10 @@ STRETCH_FLAG="none"   # "none" | "stretch"
 G_FPS=0               # gamescope -r (target display refresh, Hz; 0 = unlimited)
 
 # VRR / HDR / cursor flags
-ADAPTIVE_SYNC=0          # 0/1 -> --adaptive-sync
-ENABLE_GAMESCOPE_HDR=0   # 0/1 -> --hdr-enabled (+ ITM)
-GAMESCOPE_HDR_NITS=1000  # used with --hdr-itm-target-nits
-FORCE_GRAB_CURSOR=0      # 0/1 -> --force-grab-cursor (KMS only)
+ADAPTIVE_SYNC=0          # 0/1 -> --adaptive-sync (vanilla) or ADAPTIVE_SYNC env (chimera)
+ENABLE_GAMESCOPE_HDR=0   # 0/1 -> --hdr-enabled/ITM or ENABLE_GAMESCOPE_HDR env
+GAMESCOPE_HDR_NITS=1000  # used with --hdr-itm-target-nits / GAMESCOPE_HDR_NITS env
+FORCE_GRAB_CURSOR=0      # 0/1 -> --force-grab-cursor (KMS only, vanilla only)
 
 # PipeWire debug control for gamescope
 # "inherit" = do not set PIPEWIRE_DEBUG (respect system / environment)
@@ -98,7 +115,7 @@ PIPEWIRE_DEBUG_MODE="inherit"
 
 # LD_PRELOAD handling for gamescope/Steam
 # "inherit" = do not modify LD_PRELOAD
-# "clear"   = export LD_PRELOAD="" before launching gamescope
+# "clear"   = export LD_PRELOAD="" before launching gamescope/session
 LD_PRELOAD_MODE="inherit"
 
 MISSING_CMDS=()
@@ -201,14 +218,22 @@ Environment:
 Config:
   $CONFIG_FILE
       Stores DRM output, resolution, stretch flag, gamescope display rate,
-      VRR / HDR settings, PipeWire debug level, LD_PRELOAD handling, and Steam type.
+      VRR / HDR settings, PipeWire debug level, LD_PRELOAD handling, Steam type,
+      and gamescope backend (direct vs gamescope-session-plus).
   $LAST_GAME_FILE
       Stores last recorded game env + command (set via -R, used via -r).
+
+Gamescope backend:
+  smtty can use:
+    - Direct gamescope (portable, default)
+    - ChimeraOS gamescope-session-plus "steam" session (Arch-based only, KMS TTY only)
+  Backend is selected in interactive setup (-n) and saved in config.
 
 Notes:
   - Can be run from a bare TTY (KMS mode) or from inside a compositor
     (Hyprland, Sway, KDE, GNOME, etc.). Resolution and scaling are always
-    applied via gamescope runtime flags, not permanent display config writes.
+    applied via gamescope runtime flags or gamescope-session-plus env, not
+    permanent display config writes.
 EOF
 }
 
@@ -231,6 +256,7 @@ print_config_summary() {
   echo "  gamescope force grab:     $FORCE_GRAB_CURSOR"
   echo "  PipeWire debug mode:      $PIPEWIRE_DEBUG_MODE (inherit or 0–3)"
   echo "  LD_PRELOAD mode:          ${LD_PRELOAD_MODE:-inherit} (inherit or clear)"
+  echo "  Gamescope backend:        ${GAMESCOPE_BACKEND:-vanilla} (vanilla|chimera)"
 }
 
 save_config() {
@@ -251,6 +277,7 @@ GAMESCOPE_HDR_NITS=$GAMESCOPE_HDR_NITS
 FORCE_GRAB_CURSOR=$FORCE_GRAB_CURSOR
 PIPEWIRE_DEBUG_MODE=$PIPEWIRE_DEBUG_MODE
 LD_PRELOAD_MODE=$LD_PRELOAD_MODE
+GAMESCOPE_BACKEND=$GAMESCOPE_BACKEND
 EOF
 }
 
@@ -263,6 +290,7 @@ load_config() {
   PIPEWIRE_DEBUG_MODE=${PIPEWIRE_DEBUG_MODE:-inherit}
   FORCE_GRAB_CURSOR=${FORCE_GRAB_CURSOR:-0}
   LD_PRELOAD_MODE=${LD_PRELOAD_MODE:-inherit}
+  GAMESCOPE_BACKEND=${GAMESCOPE_BACKEND:-vanilla}
 }
 
 detect_session_mode() {
@@ -271,6 +299,27 @@ detect_session_mode() {
   else
     SESSION_MODE="kms"
   fi
+}
+
+is_arch_like() {
+  local id=""
+  local id_like=""
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    id=${ID-}
+    id_like=${ID_LIKE-}
+  fi
+
+  case "$id" in
+    arch|artix|endeavouros|manjaro|garuda) return 0 ;;
+  esac
+
+  case "$id_like" in
+    *arch*) return 0 ;;
+  esac
+
+  return 1
 }
 
 # ---------------- output / resolution selection ----------------
@@ -468,7 +517,7 @@ choose_vrr_hdr_and_steamos() {
   if [[ "$hdr" == "1" ]]; then
     ENABLE_GAMESCOPE_HDR=1
     local nits
-    nits=$(read_default "HDR ITM target nits (gamescope --hdr-itm-target-nits)" "$GAMESCOPE_HDR_NITS")
+    nits=$(read_default "HDR ITM target nits (gamescope --hdr-itm-target-nits / GAMESCOPE_HDR_NITS)" "$GAMESCOPE_HDR_NITS")
     if [[ "$nits" =~ ^[0-9]+$ ]]; then
       GAMESCOPE_HDR_NITS=$nits
     else
@@ -541,7 +590,50 @@ choose_ld_preload_mode() {
   echo
   echo "LD_PRELOAD mode set to: $LD_PRELOAD_MODE"
   echo "  inherit = pass through existing LD_PRELOAD"
-  echo "  clear   = export LD_PRELOAD=\"\" before gamescope"
+  echo "  clear   = export LD_PRELOAD=\"\" before gamescope/session"
+  echo
+}
+
+choose_gamescope_backend() {
+  echo "Gamescope backend selection:"
+
+  if is_arch_like; then
+    echo "  Arch-based system detected."
+    echo "  smtty can use either direct gamescope or ChimeraOS gamescope-session-plus."
+    echo "  gamescope-session-plus behaves like the Steam Deck's embedded session."
+    echo
+    prompt_select "Select gamescope backend:" \
+      "Direct gamescope (recommended default, portable)" \
+      "ChimeraOS gamescope-session-plus 'steam' session (Arch-only, KMS TTY only)"
+    case "$REPLY" in
+      1) GAMESCOPE_BACKEND="vanilla" ;;
+      2) GAMESCOPE_BACKEND="chimera" ;;
+      *) GAMESCOPE_BACKEND="vanilla" ;;
+    esac
+
+    if [[ "$GAMESCOPE_BACKEND" == "chimera" ]]; then
+      if ! command -v gamescope-session-plus >/dev/null 2>&1; then
+        echo
+        echo "gamescope-session-plus binary not found in PATH."
+        echo "On Arch-based systems, install the required AUR packages manually, for example:"
+        echo "  paru -S gamescope-session-git gamescope-session-steam-git"
+        echo "  yay  -S gamescope-session-git gamescope-session-steam-git"
+        echo
+        echo "smtty will fall back to direct gamescope until gamescope-session-plus is installed."
+      fi
+    fi
+  else
+    echo "Your system does not look Arch-based."
+    echo "smtty's gamescope-session-plus integration currently expects the Arch AUR packages:"
+    echo "  gamescope-session-git, gamescope-session-steam-git"
+    echo
+    echo "On non-Arch systems, you can attempt a manual setup by following ChimeraOS docs:"
+    echo "  https://github.com/ChimeraOS/gamescope-session"
+    echo
+    echo "Direct gamescope will be used as the backend."
+    GAMESCOPE_BACKEND="vanilla"
+  fi
+
   echo
 }
 
@@ -850,50 +942,9 @@ handle_running_steam_before_launch() {
   esac
 }
 
-launch_gamescope_session() {
-  configure_steam_command
-  check_deps
-
-  local inner_cmd=()
-  local inner_label="Steam Gamepad UI"
-
-  if (( FLAG_REPLAY_GAME )); then
-    load_last_game
-
-    export SteamAppId="$APP_ID"
-    export SteamGameId="${GAME_ID:-$APP_ID}"
-    export STEAM_COMPAT_APP_ID
-    export STEAM_COMPAT_DATA_PATH
-    export STEAM_COMPAT_CLIENT_INSTALL_PATH
-    if [[ -n "${STEAM_COMPAT_INSTALL_PATH-}" ]]; then
-      export STEAM_COMPAT_INSTALL_PATH
-    fi
-
-    inner_cmd=("${GAME_CMD_ARR[@]}")
-    inner_label="Last recorded game (Proton pipeline)"
-  else
-    inner_cmd=("${STEAM_CMD_ARR[@]}")
-    inner_label="Steam Gamepad UI (Big Picture)"
-  fi
-
-  echo
-  echo "Launching gamescope:"
-  echo "  Session mode:          $SESSION_MODE (kms = bare VT, nested = under compositor)"
-  echo "  Steam type:            ${STEAM_TYPE:-native}"
-  echo "  DRM output:            $DRM_SHORT"
-  echo "  Outer (panel/native):  ${NATIVE_W}x${NATIVE_H}"
-  echo "  Inner (game):          ${GAME_W}x${GAME_H}"
-  echo "  Stretch mode:          ${STRETCH_FLAG}"
-  echo "  Target refresh:        ${G_FPS} Hz (gamescope -r, 0 = unlimited)"
-  echo "  Adaptive sync (VRR):   ${ADAPTIVE_SYNC}"
-  echo "  HDR enabled:           ${ENABLE_GAMESCOPE_HDR}"
-  echo "  HDR ITM target nits:   ${GAMESCOPE_HDR_NITS}"
-  echo "  Force cursor grab:     ${FORCE_GRAB_CURSOR} (KMS only)"
-  echo "  PipeWire debug mode:   ${PIPEWIRE_DEBUG_MODE}"
-  echo "  LD_PRELOAD mode:       ${LD_PRELOAD_MODE:-inherit}"
-  echo "  Inner payload:         $inner_label"
-  echo "  Detach mode:           ${FLAG_DETACH}"
-  echo
+launch_vanilla_gamescope() {
+  # $@: inner command (Steam Gamepad UI or last recorded game pipeline)
+  local inner_cmd=("$@")
 
   local args=()
   args+=(-f -e)
@@ -953,6 +1004,167 @@ launch_gamescope_session() {
   fi
 }
 
+launch_chimera_gamescope_session() {
+  # gamescope-session-plus "steam" session
+  # We map smtty's config to environment variables expected by gamescope-session-plus.
+  # This is KMS-only (bare TTY) and Arch-based only.
+
+  if [[ "$SESSION_MODE" != "kms" ]]; then
+    echo "gamescope-session-plus backend requires a bare KMS TTY. Current session is nested."
+    echo "Falling back to direct gamescope."
+    return 1
+  fi
+
+  if ! command -v gamescope-session-plus >/dev/null 2>&1; then
+    echo "gamescope-session-plus not found in PATH; cannot use Chimera backend."
+    if is_arch_like; then
+      echo "Install the required AUR packages manually, for example:"
+      echo "  paru -S gamescope-session-git gamescope-session-steam-git"
+      echo "  yay  -S gamescope-session-git gamescope-session-steam-git"
+    else
+      echo "On non-Arch systems, see ChimeraOS docs:"
+      echo "  https://github.com/ChimeraOS/gamescope-session"
+    fi
+    echo "Falling back to direct gamescope."
+    return 1
+  fi
+
+  # Map outer and inner resolution to gamescope-session-plus env
+  export SCREEN_WIDTH="$NATIVE_W"
+  export SCREEN_HEIGHT="$NATIVE_H"
+  export INTERNAL_WIDTH="$GAME_W"
+  export INTERNAL_HEIGHT="$GAME_H"
+
+  # VRR / HDR env mapping (from ChimeraOS gamescope-session docs)
+  export ADAPTIVE_SYNC="$ADAPTIVE_SYNC"
+  export ENABLE_GAMESCOPE_HDR="$ENABLE_GAMESCOPE_HDR"
+  export GAMESCOPE_HDR_NITS="$GAMESCOPE_HDR_NITS"
+
+  # We keep PIPEWIRE_DEBUG / LD_PRELOAD behavior the same as vanilla.
+  if [[ "${PIPEWIRE_DEBUG_MODE:-inherit}" != "inherit" ]]; then
+    export PIPEWIRE_DEBUG="$PIPEWIRE_DEBUG_MODE"
+  fi
+
+  if [[ "${LD_PRELOAD_MODE:-inherit}" == "clear" ]]; then
+    export LD_PRELOAD=""
+  fi
+
+  echo "Command:"
+  echo "gamescope-session-plus steam"
+  echo
+  echo "Note:"
+  echo "  - Resolution, VRR, HDR and target nits are passed via SCREEN_*/INTERNAL_* and"
+  echo "    ADAPTIVE_SYNC/ENABLE_GAMESCOPE_HDR/GAMESCOPE_HDR_NITS."
+  echo "  - The Steam client command line is provided by the ChimeraOS steam session."
+  echo
+
+  if (( FLAG_DETACH )); then
+    if command -v setsid >/dev/null 2>&1; then
+      setsid gamescope-session-plus steam >/dev/null 2>&1 &
+    else
+      gamescope-session-plus steam >/dev/null 2>&1 &
+    fi
+    echo "gamescope-session-plus steam started in detached mode with PID $!."
+    echo "Use 'smtty -k' to kill any running gamescope (not the session wrapper itself)."
+    exit 0
+  else
+    exec gamescope-session-plus steam
+  fi
+}
+
+launch_gamescope_session() {
+  configure_steam_command
+  check_deps
+
+  local inner_cmd=()
+  local inner_label="Steam Gamepad UI"
+
+  if (( FLAG_REPLAY_GAME )); then
+    load_last_game
+
+    export SteamAppId="$APP_ID"
+    export SteamGameId="${GAME_ID:-$APP_ID}"
+    export STEAM_COMPAT_APP_ID
+    export STEAM_COMPAT_DATA_PATH
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH
+    if [[ -n "${STEAM_COMPAT_INSTALL_PATH-}" ]]; then
+      export STEAM_COMPAT_INSTALL_PATH
+    fi
+
+    inner_cmd=("${GAME_CMD_ARR[@]}")
+    inner_label="Last recorded game (Proton pipeline)"
+  else
+    inner_cmd=("${STEAM_CMD_ARR[@]}")
+    inner_label="Steam Gamepad UI (Big Picture)"
+  fi
+
+  # Decide effective backend for this launch.
+  # - Chimera backend only supports:
+  #     * KMS session (bare TTY)
+  #     * Big Picture / Steam session, NOT direct replay (-r)
+  # - In other cases, we fallback to vanilla gamescope.
+  local backend="$GAMESCOPE_BACKEND"
+
+  if (( FLAG_REPLAY_GAME )); then
+    backend="vanilla"
+  fi
+
+  if [[ "$backend" == "chimera" && "$SESSION_MODE" != "kms" ]]; then
+    echo "gamescope-session-plus backend requires running smtty from a bare TTY (no X11/Wayland)."
+    echo "Current session is nested; using direct gamescope for this launch."
+    backend="vanilla"
+  fi
+
+  if [[ "$backend" == "chimera" ]] && ! is_arch_like; then
+    echo "gamescope-session-plus backend currently expects Arch-based AUR packaging."
+    echo "Using direct gamescope for this launch."
+    backend="vanilla"
+  fi
+
+  if [[ "$backend" == "chimera" ]] && ! command -v gamescope-session-plus >/dev/null 2>&1; then
+    echo "gamescope-session-plus not found in PATH; cannot use Chimera backend for this launch."
+    if is_arch_like; then
+      echo "Install the required AUR packages manually, for example:"
+      echo "  paru -S gamescope-session-git gamescope-session-steam-git"
+      echo "  yay  -S gamescope-session-git gamescope-session-steam-git"
+    else
+      echo "On non-Arch systems, see ChimeraOS docs:"
+      echo "  https://github.com/ChimeraOS/gamescope-session"
+    fi
+    echo "Using direct gamescope for this launch."
+    backend="vanilla"
+  fi
+
+  echo
+  echo "Launching gamescope:"
+  echo "  Session mode:          $SESSION_MODE (kms = bare VT, nested = under compositor)"
+  echo "  Steam type:            ${STEAM_TYPE:-native}"
+  echo "  DRM output:            $DRM_SHORT"
+  echo "  Outer (panel/native):  ${NATIVE_W}x${NATIVE_H}"
+  echo "  Inner (game):          ${GAME_W}x${GAME_H}"
+  echo "  Stretch mode:          ${STRETCH_FLAG}"
+  echo "  Target refresh:        ${G_FPS} Hz (gamescope -r, 0 = unlimited)"
+  echo "  Adaptive sync (VRR):   ${ADAPTIVE_SYNC}"
+  echo "  HDR enabled:           ${ENABLE_GAMESCOPE_HDR}"
+  echo "  HDR ITM target nits:   ${GAMESCOPE_HDR_NITS}"
+  echo "  Force cursor grab:     ${FORCE_GRAB_CURSOR} (KMS only, vanilla only)"
+  echo "  PipeWire debug mode:   ${PIPEWIRE_DEBUG_MODE}"
+  echo "  LD_PRELOAD mode:       ${LD_PRELOAD_MODE:-inherit}"
+  echo "  Inner payload:         $inner_label"
+  echo "  Detach mode:           ${FLAG_DETACH}"
+  echo "  Gamescope backend:     ${backend} (vanilla = direct gamescope, chimera = gamescope-session-plus)"
+  echo
+
+  if [[ "$backend" == "chimera" ]]; then
+    # Try Chimera; if it fails constraints, we fall back to vanilla inside the function.
+    if ! launch_chimera_gamescope_session; then
+      launch_vanilla_gamescope "${inner_cmd[@]}"
+    fi
+  else
+    launch_vanilla_gamescope "${inner_cmd[@]}"
+  fi
+}
+
 interactive_new_config() {
   detect_session_mode
   detect_steam_installations
@@ -962,6 +1174,7 @@ interactive_new_config() {
   choose_vrr_hdr_and_steamos
   choose_pipewire_debug
   choose_ld_preload_mode
+  choose_gamescope_backend
   save_config
   handle_running_steam_before_launch
   launch_gamescope_session
@@ -982,6 +1195,7 @@ run_from_current_config() {
   PIPEWIRE_DEBUG_MODE=${PIPEWIRE_DEBUG_MODE:-inherit}
   FORCE_GRAB_CURSOR=${FORCE_GRAB_CURSOR:-0}
   LD_PRELOAD_MODE=${LD_PRELOAD_MODE:-inherit}
+  GAMESCOPE_BACKEND=${GAMESCOPE_BACKEND:-vanilla}
 
   if [[ "$STEAM_TYPE" == "flatpak" ]]; then
     if ! command -v flatpak >/dev/null 2>&1 || \
@@ -1012,6 +1226,7 @@ generate_launch_opts() {
     choose_vrr_hdr_and_steamos
     choose_pipewire_debug
     choose_ld_preload_mode
+    # Backend choice is irrelevant for nested per-game launch options; skip.
     save_config
     HAVE_CONFIG=1
   fi
