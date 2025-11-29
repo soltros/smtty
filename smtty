@@ -478,16 +478,35 @@ choose_gamescope_rate() {
 choose_vrr_hdr_and_steamos() {
   echo "Optional gamescope features:"
 
+  # Strict 0/1 validation for VRR
   local vrr
-  vrr=$(read_default "Enable gamescope adaptive sync / VRR? (0 = no, 1 = yes)" "$ADAPTIVE_SYNC")
-  if [[ "$vrr" == "1" ]]; then
-    ADAPTIVE_SYNC=1
-  else
-    ADAPTIVE_SYNC=0
-  fi
+  while :; do
+    vrr=$(read_default "Enable gamescope adaptive sync / VRR? (0 = no, 1 = yes)" "$ADAPTIVE_SYNC")
+    case "$vrr" in
+      0|1)
+        ADAPTIVE_SYNC=$vrr
+        break
+        ;;
+      *)
+        echo "Enter 0 or 1."
+        ;;
+    esac
+  done
 
+  # Strict 0/1 validation for HDR
   local hdr
-  hdr=$(read_default "Enable gamescope HDR output? (0 = no, 1 = yes)" "$ENABLE_GAMESCOPE_HDR")
+  while :; do
+    hdr=$(read_default "Enable gamescope HDR output? (0 = no, 1 = yes)" "$ENABLE_GAMESCOPE_HDR")
+    case "$hdr" in
+      0|1)
+        break
+        ;;
+      *)
+        echo "Enter 0 or 1."
+        ;;
+    esac
+  done
+
   if [[ "$hdr" == "1" ]]; then
     ENABLE_GAMESCOPE_HDR=1
     local nits
@@ -505,13 +524,21 @@ choose_vrr_hdr_and_steamos() {
   echo "Cursor grab:"
   echo "  Mostly useful on bare TTY (KMS). In nested sessions it can make"
   echo "  mouse input worse if games + overlays already manage grabs."
+
+  # Strict 0/1 validation for cursor grab
   local fg
-  fg=$(read_default "Force gamescope cursor grab in KMS mode? (0 = no, 1 = yes)" "$FORCE_GRAB_CURSOR")
-  if [[ "$fg" == "1" ]]; then
-    FORCE_GRAB_CURSOR=1
-  else
-    FORCE_GRAB_CURSOR=0
-  fi
+  while :; do
+    fg=$(read_default "Force gamescope cursor grab in KMS mode? (0 = no, 1 = yes)" "$FORCE_GRAB_CURSOR")
+    case "$fg" in
+      0|1)
+        FORCE_GRAB_CURSOR=$fg
+        break
+        ;;
+      *)
+        echo "Enter 0 or 1."
+        ;;
+    esac
+  done
 
   echo
 }
