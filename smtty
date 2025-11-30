@@ -12,29 +12,8 @@
 #   -O
 #     Generate ready-to-paste Steam per-game launch options (nested gamescope, no Big Picture).
 #
-#   -R
-#     Record the Steam/Proton environment and game command being launched, then exec it.
-#     Intended for use in Steam launch options, for example:
-#       smtty -R gamemoderun %command% -novid +fps_max 0 -high -dx12
-#
-#     Writes ~/.config/smtty/last_game with:
-#       - SteamAppId, SteamGameId
-#       - STEAM_COMPAT_APP_ID, STEAM_COMPAT_DATA_PATH,
-#         STEAM_COMPAT_CLIENT_INSTALL_PATH, STEAM_COMPAT_INSTALL_PATH
-#       - GAME_CMD_ARR=( ... )  (the full Proton pipeline, including your wrapper flags)
-#
-#   -r
-#     Replay the last recorded game instead of Steam Gamepad UI inside gamescope.
-#     Internally:
-#       - restores Steam/Proton env from last_game
-#       - runs "${GAME_CMD_ARR[@]}" directly as gamescope's inner payload
-#
-#     Typical usage from a bare KMS TTY:
-#       smtty -l -r
-#
 #   -l
-#     Use last saved smtty config (DRM, res, VRR, HDR, etc.) non-interactively.
-#     Note: with -l, smtty will NOT kill Steam or ask about it unless you also pass -S.
+#     Use last saved smtty config non-interactively to launch gamescope.
 #
 #   -n
 #     New interactive setup for smtty config.
@@ -91,7 +70,6 @@ SESSION_MODE="kms"
 # ---------------- config paths ----------------
 CONFIG_DIR="$HOME/.config/smtty"
 CONFIG_FILE="$CONFIG_DIR/config"
-LAST_GAME_FILE="$CONFIG_DIR/last_game"
 
 # ---------------- state ----------------
 DRM_SHORT=""
@@ -127,9 +105,6 @@ LD_PRELOAD_MODE="inherit"
 MISSING_CMDS=()
 HAVE_CONFIG=0
 
-# Recorded game command (from last_game)
-GAME_CMD_ARR=()
-
 # flags
 FLAG_HELP=0
 FLAG_NEW=0
@@ -138,8 +113,6 @@ FLAG_PRINT=0
 FLAG_KILL=0
 FLAG_DETACH=0
 FLAG_LAUNCH_OPTS=0  # -O: generate Steam launch options
-FLAG_RECORD=0       # -R: record last game (from Steam)
-FLAG_REPLAY_GAME=0  # -r: replay last recorded game inside gamescope
 FLAG_KILL_STEAM=0   # -S: kill Steam client before launching (no prompt)
 
 # ---------------- helpers ----------------
@@ -204,12 +177,6 @@ Options:
   -d        Detach: start gamescope/Steam in the background and return immediately.
   -S        Kill any running Steam client before launching gamescope (no prompt).
   -O        Interactively generate ready-to-paste Steam per-game launch options and exit.
-  -R        Record the game being launched (Steam/Proton env + command) and then run it.
-            Intended for use from Steam launch options, e.g.:
-              smtty -R gamemoderun %command% -novid +fps_max 0 -high -dx12
-  -r        Replay last recorded game instead of Steam Gamepad UI when starting gamescope.
-            Uses recorded Proton pipeline under gamescope.
-            Typically used together with -l from a bare KMS TTY.
 
 Environment:
   STEAM_CMD_OVERRIDE='steam -gamepadui'
@@ -225,8 +192,6 @@ Config:
   $CONFIG_FILE
       Stores DRM output, resolution, stretch flag, gamescope display rate,
       VRR / HDR settings, PipeWire debug level, LD_PRELOAD handling, Steam type.
-  $LAST_GAME_FILE
-      Stores last recorded game env + command (set via -R, used via -r).
 
 Notes:
   - Can be run from a bare TTY (KMS mode) or from inside a compositor
@@ -326,7 +291,7 @@ choose_drm_output() {
         mh=${BASH_REMATCH[2]}
         area=$(( mw * mh ))
         if (( area > max_area )); then
-          max_area=$area
+          max_area=area
           native_line="$mline"
         fi
       fi
@@ -645,7 +610,8 @@ print_steam_launch_options() {
 
   # Build gamescope args to match normal smtty behavior.
   local args=()
-  args+=(-f -e)
+  args+=(-f)  # no -e here, Steam integration flag is not needed for per-game nested lines
+
   args+=(-W "$NATIVE_W" -H "$NATIVE_H")
   args+=(-w "$GAME_W" -h "$GAME_H")
 
@@ -704,70 +670,6 @@ print_steam_launch_options() {
 
   echo
   echo "Paste the above line into this game's Steam \"Launch Options\"."
-}
-
-# ---------------- record / replay last game ----------------
-record_last_game() {
-  if (($# == 0)); then
-    print_error "smtty -R: missing game command to record."
-    exit 1
-  fi
-
-  mkdir -p "$CONFIG_DIR"
-
-  local app_id="${SteamAppId-${STEAM_COMPAT_APP_ID-}}"
-  local game_id="${SteamGameId-${app_id}}"
-  local compat_id="${STEAM_COMPAT_APP_ID-${app_id}}"
-  local compat_data="${STEAM_COMPAT_DATA_PATH-}"
-  local compat_client="${STEAM_COMPAT_CLIENT_INSTALL_PATH-}"
-  local compat_install="${STEAM_COMPAT_INSTALL_PATH-}"
-
-  if [[ -z "$app_id" || -z "$compat_data" || -z "$compat_client" ]]; then
-    print_error "smtty -R: missing Steam/Proton env (SteamAppId/STEAM_COMPAT_*)."
-    echo "Make sure you are running this via Steam launch options: smtty -R %command% ..." >&2
-    exit 1
-  fi
-
-  local cmd_literal="("
-  local arg
-  for arg in "$@"; do
-    printf -v cmd_literal '%s %q' "$cmd_literal" "$arg"
-  done
-  cmd_literal+=" )"
-
-  {
-    printf 'SteamAppId=%q\n' "$app_id"
-    printf 'SteamGameId=%q\n' "$game_id"
-    printf 'STEAM_COMPAT_APP_ID=%q\n' "$compat_id"
-    printf 'STEAM_COMPAT_DATA_PATH=%q\n' "$compat_data"
-    printf 'STEAM_COMPAT_CLIENT_INSTALL_PATH=%q\n' "$compat_client"
-    printf 'STEAM_COMPAT_INSTALL_PATH=%q\n' "$compat_install"
-    printf 'APP_ID=%q\n' "$app_id"
-    printf 'GAME_ID=%q\n' "$game_id"
-    printf 'GAME_CMD_ARR=%s\n' "$cmd_literal"
-  } >"$LAST_GAME_FILE"
-}
-
-load_last_game() {
-  if [[ ! -f "$LAST_GAME_FILE" ]]; then
-    print_error "No last-game record found at $LAST_GAME_FILE."
-    echo "Launch a game once from Steam using, for example:"
-    echo "  smtty -R gamemoderun %command% -novid +fps_max 0 -high -dx12"
-    exit 1
-  fi
-
-  # shellcheck disable=SC1090
-  . "$LAST_GAME_FILE"
-
-  if [[ -z "${APP_ID-}" || -z "${STEAM_COMPAT_DATA_PATH-}" || -z "${STEAM_COMPAT_CLIENT_INSTALL_PATH-}" ]]; then
-    print_error "Last-game record incomplete; regenerate via smtty -R in Steam."
-    exit 1
-  fi
-
-  if [[ ${#GAME_CMD_ARR[@]} -eq 0 ]]; then
-    print_error "Last-game record missing GAME_CMD_ARR; regenerate via smtty -R."
-    exit 1
-  fi
 }
 
 # ---------------- Steam installation detection ----------------
@@ -922,7 +824,7 @@ handle_running_steam_before_launch() {
 }
 
 launch_vanilla_gamescope() {
-  # $@: inner command (Steam Gamepad UI or last recorded game pipeline)
+  # $@: inner command (Steam Gamepad UI)
   local inner_cmd=("$@")
 
   local args=()
@@ -999,27 +901,8 @@ launch_gamescope_session() {
   configure_steam_command
   check_deps
 
-  local inner_cmd=()
-  local inner_label="Steam Gamepad UI"
-
-  if (( FLAG_REPLAY_GAME )); then
-    load_last_game
-
-    export SteamAppId="$APP_ID"
-    export SteamGameId="${GAME_ID:-$APP_ID}"
-    export STEAM_COMPAT_APP_ID
-    export STEAM_COMPAT_DATA_PATH
-    export STEAM_COMPAT_CLIENT_INSTALL_PATH
-    if [[ -n "${STEAM_COMPAT_INSTALL_PATH-}" ]]; then
-      export STEAM_COMPAT_INSTALL_PATH
-    fi
-
-    inner_cmd=("${GAME_CMD_ARR[@]}")
-    inner_label="Last recorded game (Proton pipeline)"
-  else
-    inner_cmd=("${STEAM_CMD_ARR[@]}")
-    inner_label="Steam Gamepad UI (Big Picture)"
-  fi
+  local inner_cmd=("${STEAM_CMD_ARR[@]}")
+  local inner_label="Steam Gamepad UI (Big Picture)"
 
   echo
   echo "Launching gamescope:"
@@ -1104,57 +987,31 @@ generate_launch_opts() {
     choose_ld_preload_mode
     save_config
     HAVE_CONFIG=1
+  else
+    detect_session_mode
+    echo "Found saved smtty config."
+    print_config_summary
+    echo
+    local ans
+    read -rp "Use last settings for launch options? [y/N]: " ans || exit 1
+    case "$ans" in
+      [yY]) ;;
+      *)
+        detect_session_mode
+        detect_steam_installations
+        choose_drm_output
+        choose_resolution_profile
+        choose_gamescope_rate
+        choose_vrr_hdr_and_steamos
+        choose_pipewire_debug
+        choose_ld_preload_mode
+        save_config
+        ;;
+    esac
   fi
 
   print_steam_launch_options
   exit 0
-}
-
-handle_last_with_replay_menu() {
-  if (( HAVE_CONFIG == 0 )); then
-    print_error "No saved smtty config; run 'smtty -n' first."
-    exit 1
-  fi
-
-  if [[ ! -f "$LAST_GAME_FILE" ]]; then
-    print_error "No last-game record; use smtty -R in Steam first."
-    exit 1
-  fi
-
-  if ! steam_is_running; then
-    FLAG_REPLAY_GAME=1
-    run_from_current_config
-    return
-  fi
-
-  echo
-  echo "smtty last-config + replay mode:"
-  echo "  Steam desktop client is currently running."
-  echo "  There can only be one Steam instance at a time."
-  echo "  1) Run last recorded game only (using recorded Proton pipeline)."
-  echo "     Steam desktop stays running; gamescope will not relaunch Gamepad UI."
-  echo "  2) Kill desktop Steam and launch Steam Gamepad UI (Big Picture) in gamescope."
-  local choice
-  while :; do
-    read -rp "Choose [1/2]: " choice || exit 1
-    case "$choice" in
-      1)
-        FLAG_REPLAY_GAME=1
-        run_from_current_config
-        return
-        ;;
-      2)
-        echo "Killing desktop Steam and relaunching Gamepad UI in gamescope..."
-        kill_steam_client
-        FLAG_REPLAY_GAME=0
-        run_from_current_config
-        return
-        ;;
-      *)
-        echo "Invalid choice."
-        ;;
-    esac
-  done
 }
 
 kill_gamescope() {
@@ -1171,7 +1028,7 @@ if [[ ${UID:-$(id -u)} -eq 0 ]]; then
   exit 1
 fi
 
-while getopts ":hnlpkdORrS" opt; do
+while getopts ":hnlpkdOS" opt; do
   case "$opt" in
     h) FLAG_HELP=1 ;;
     n) FLAG_NEW=1 ;;
@@ -1180,8 +1037,6 @@ while getopts ":hnlpkdORrS" opt; do
     k) FLAG_KILL=1 ;;
     d) FLAG_DETACH=1 ;;
     O) FLAG_LAUNCH_OPTS=1 ;;
-    R) FLAG_RECORD=1 ;;
-    r) FLAG_REPLAY_GAME=1 ;;
     S) FLAG_KILL_STEAM=1 ;;
     \?) print_error "Unknown option: -$OPTARG"; exit 1 ;;
   esac
@@ -1200,12 +1055,6 @@ fi
 
 load_config
 
-# -R: record last game and then exec the provided command (for Steam launch options)
-if (( FLAG_RECORD )); then
-  record_last_game "$@"
-  exec "$@"
-fi
-
 # -O: just generate Steam launch options and exit
 if (( FLAG_LAUNCH_OPTS )); then
   generate_launch_opts
@@ -1223,13 +1072,8 @@ if (( FLAG_LAST )); then
     exit 0
   fi
 
-  if (( FLAG_REPLAY_GAME )); then
-    handle_last_with_replay_menu
-    exit 0
-  else
-    run_from_current_config
-    exit 0
-  fi
+  run_from_current_config
+  exit 0
 fi
 
 if (( FLAG_NEW )); then
